@@ -33,11 +33,11 @@
     // internet connectivity.
     .dependencies = .{
         .zla = .{
-            .url = "./deps/zla/",
-            .hash = "zla-0.0.0-7oyaWgW-AADsFDEHdU4iktlsTjFacbexkqL0oOGpjwaL",
+            .url = "git+https://github.com/geshengpsn/zla.git#4050d0388a0dad5a9cdbdfd3361c0cd588dbc531",
+            .hash = "zla-0.0.0-7oyaWnL2AADaK1pVGHEmWJ9_KJySSvMBvJxY6j61aQg1",
         },
         .zplotly = .{
-            .url = "./deps/zplotly/",
+            .url = "git+https://github.com/geshengpsn/zplotly.git#ea02018e7d4fcbc65b75778bccd9941e3fa55bc1",
             .hash = "zplotly-0.1.0-uj252aRCAAAkY1nkQe-8xH8y57ih8sQN5UNx5sE8av-z",
         },
     },

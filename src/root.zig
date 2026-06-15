@@ -12,7 +12,7 @@ const P = zla.Mat(f64, 2, 2).init(.{
 
 const Q: @Vector(2, f64) = .{ 1.0, 0.0 };
 
-fn f(x: @Vector(2, f64)) f64 {
+fn f_qp(x: @Vector(2, f64)) f64 {
     var temp: @Vector(2, f64) = undefined;
     P.vec_mul(&x, &temp);
     temp = temp * @as(@Vector(2, f64), @splat(0.5));
@@ -31,7 +31,7 @@ fn hessian(x: @Vector(2, f64)) zla.Mat(f64, 2, 2) {
 }
 
 test "aa" {
-    const result = f(.{ 1.0, 2.0 });
+    const result = f_qp(.{ 1.0, 2.0 });
     try std.testing.expectEqual(result, 5.5);
 }
 
@@ -79,7 +79,7 @@ test "GD backtracking Armijo" {
         const grad = df(x);
         if (@sqrt(@reduce(.Add, grad * grad)) < 1e-9) break;
         const dir = -grad;
-        const t = armijo(2, f64, f, x, grad, dir);
+        const t = armijo(2, f64, f_qp, x, grad, dir);
         x = x + @as(@Vector(2, f64), @splat(t)) * dir;
         count += 1;
     }
@@ -307,19 +307,21 @@ fn Solver(comptime n: usize, comptime T: type) type {
 fn optimizeNoConstraints(
     comptime n: usize,
     comptime T: type,
-    objective: type,
-    solver: type,
+    f: fn (x: @Vector(n, T)) T,
+    grad: fn (x: @Vector(n, T)) @Vector(n, T),
+    hess: fn (x: @Vector(n, T)) zla.Mat(T, n, n),
+    solver: fn (hess: *const zla.Mat(T, n, n), grad: *const @Vector(n, T), dir: *@Vector(n, T)) void,
     init_x: ?@Vector(n, T),
     e: T,
 ) @Vector(n, T) {
     var x: @Vector(n, T) = init_x orelse @as(@Vector(n, T), @splat(0));
     while (true) {
-        const hess = objective.hess(x);
-        const grad = objective.grad(x);
-        var dir: @TypeOf(grad) = undefined;
-        solver.solve(&hess, &grad, &dir);
-        const t = armijo(n, T, objective.f, x, grad, dir);
-        const err: T = -@reduce(.Add, grad * dir) / @as(T, 2.0);
+        const hess_val = hess(x);
+        const grad_val = grad(x);
+        var dir: @TypeOf(grad_val) = undefined;
+        solver(&hess_val, &grad_val, &dir);
+        const t = armijo(n, T, f, x, grad_val, dir);
+        const err: T = -@reduce(.Add, grad_val * dir) / @as(T, 2.0);
         if (err < e) break;
         x = x + @as(@Vector(n, T), @splat(t)) * dir;
     }
@@ -328,40 +330,41 @@ fn optimizeNoConstraints(
 
 test "optimizeNoConstraints" {
     const init_x: @Vector(2, f64) = .{ 2.0, 4.0 };
-    const result = optimizeNoConstraints(2, f64, funcs, struct {
+    const result = optimizeNoConstraints(2, f64, funcs.f, funcs.grad, funcs.hess, struct {
         fn solve(a: *const zla.Mat(f64, 2, 2), b: *const @Vector(2, f64), x: *@Vector(2, f64)) void {
-            a.solve_lu(-b, x) catch unreachable;
+            const rhs = -b.*;
+            a.solve_cholesky(&rhs, x) catch unreachable;
         }
-    }, init_x, 1e-10);
+    }.solve, init_x, 1e-10);
     try std.testing.expectApproxEqAbs(@reduce(.Add, funcs.grad(result)), 0.0, 1e-4);
 }
 
-fn optimality_conditions_armijo(
-    comptime n: usize,
-    comptime p: usize,
-    comptime T: type,
-    r_norm: fn (@Vector(n, T), @Vector(p, T)) T,
-    x: @Vector(n, T),
-    dual: @Vector(n, T),
-    x_dir: @Vector(n, T),
-    dual_dir: @Vector(p, T),
-    alpha: T,
-    beta: T,
-) T {
-    std.debug.assert(0.0 < alpha and alpha < 0.5);
-    std.debug.assert(0.0 < beta and beta < 1.0);
+// fn optimality_conditions_armijo(
+//     comptime n: usize,
+//     comptime p: usize,
+//     comptime T: type,
+//     r_norm: fn (@Vector(n, T), @Vector(p, T)) T,
+//     x: @Vector(n, T),
+//     dual: @Vector(n, T),
+//     x_dir: @Vector(n, T),
+//     dual_dir: @Vector(p, T),
+//     alpha: T,
+//     beta: T,
+// ) T {
+//     std.debug.assert(0.0 < alpha and alpha < 0.5);
+//     std.debug.assert(0.0 < beta and beta < 1.0);
 
-    var t: T = 1.0;
-    const norm = r_norm(x, dual);
+//     var t: T = 1.0;
+//     const norm = r_norm(x, dual);
 
-    while (r_norm(
-        x + @as(@Vector(n, T), @splat(t)) * x_dir,
-        dual + @as(@Vector(n, T), @splat(t)) * dual_dir,
-    ) > (1 - alpha * t) * norm) {
-        t *= beta;
-    }
-    return t;
-}
+//     while (r_norm(
+//         x + @as(@Vector(n, T), @splat(t)) * x_dir,
+//         dual + @as(@Vector(n, T), @splat(t)) * dual_dir,
+//     ) > (1 - alpha * t) * norm) {
+//         t *= beta;
+//     }
+//     return t;
+// }
 
 fn Params(comptime T: type) type {
     return struct {
@@ -371,43 +374,150 @@ fn Params(comptime T: type) type {
     };
 }
 
+fn r(
+    comptime n: usize,
+    comptime p: usize,
+    comptime T: type,
+    grad_val: *const @Vector(n, T),
+    a: *const zla.Mat(T, p, n),
+    b: *const @Vector(p, T),
+    x: *const @Vector(n, T),
+    dual: *const @Vector(p, T),
+    r_dual: *@Vector(n, T),
+    r_prim: *@Vector(p, T),
+) void {
+    const a_transpose = a.transpose();
+    var a_transpose_dual: @Vector(n, T) = undefined;
+    a_transpose.vec_mul(dual, &a_transpose_dual);
+
+    r_dual.* = grad_val.* + a_transpose_dual;
+    var ax: @Vector(p, T) = undefined;
+    a.vec_mul(x, &ax);
+    r_prim.* = ax - b.*;
+}
+
+fn r_norm(
+    comptime n: usize,
+    comptime p: usize,
+    comptime T: type,
+    r_dual: *const @Vector(n, T),
+    r_prim: *const @Vector(p, T),
+) T {
+    return @sqrt(@reduce(.Add, r_dual.* * r_dual.*) + @reduce(.Add, r_prim.* * r_prim.*));
+}
+
+fn EqConstraintsResult(comptime n: usize, comptime p: usize, comptime T: type) type {
+    return struct {
+        x: @Vector(n, T),
+        dual: @Vector(p, T),
+    };
+}
+
 fn optimizeEqConstraints(
     comptime n: usize,
     comptime p: usize,
     comptime T: type,
-    objective: type,
-    eq_constraints: EqConstraints(p, T),
-    solver: type,
+    f: fn (x: @Vector(n, T)) T,
+    grad: fn (x: @Vector(n, T)) @Vector(n, T),
+    hess: fn (x: @Vector(n, T)) zla.Mat(T, n, n),
+    eq_constraints: EqConstraints(n, p, T),
+    solver: fn (
+        hess: *const zla.Mat(T, n, n),
+        a: *const zla.Mat(T, p, n),
+        r_dual: *const @Vector(n, T),
+        r_prim: *const @Vector(p, T),
+        x_step: *@Vector(n, T),
+        dual_step: *@Vector(p, T),
+    ) void,
     init_x: ?@Vector(n, T),
     params: ?Params(T),
-) void {
+) EqConstraintsResult(n, p, T) {
     const param: Params(T) = params orelse .{};
     var x: @Vector(n, T) = init_x orelse @as(@Vector(n, T), @splat(0));
     var dual: @Vector(p, T) = @as(@Vector(p, T), @splat(0));
     std.debug.assert(param.e > 0.0);
     std.debug.assert(0.0 < param.alpha and param.alpha < 0.5);
     std.debug.assert(0.0 < param.beta and param.beta < 1.0);
-    std.debug.assert(!std.math.isInf(objective.f(x)) and !std.math.isNan(objective.f(x)));
-
+    std.debug.assert(!std.math.isInf(f(x)) and !std.math.isNan(f(x)));
+    var r_dual: @Vector(n, T) = undefined;
+    var r_prim: @Vector(p, T) = undefined;
+    var x_step: @Vector(n, T) = undefined;
+    var dual_step: @Vector(p, T) = undefined;
     while (true) {
-        const hess = objective.hess(x);
-        const grad = objective.grad(x);
-        var x_dir: @TypeOf(grad) = undefined;
-        var dual_dir: @TypeOf(grad) = undefined;
-        const r_dual = grad + eq_constraints.a.transpose();
-        solver.solve(&hess, &grad, &dir);
-        var t: T = 1.0;
-        const norm = r_norm(x, dual);
+        const hess_val = hess(x);
+        const grad_val = grad(x);
 
-        while (r_norm(
-            x + @as(@Vector(n, T), @splat(t)) * x_dir,
-            dual + @as(@Vector(n, T), @splat(t)) * dual_dir,
-        ) > (1 - alpha * t) * norm) {
-            t *= beta;
+        r(n, p, T, &grad_val, &eq_constraints.a, &eq_constraints.b, &x, &dual, &r_dual, &r_prim);
+        const norm = r_norm(n, p, T, &r_dual, &r_prim);
+        if (norm < param.e) break;
+
+        solver(&hess_val, &eq_constraints.a, &r_dual, &r_prim, &x_step, &dual_step);
+
+        var t: T = 1.0;
+        while (true) {
+            const x_t = x + @as(@Vector(n, T), @splat(t)) * x_step;
+            const dual_t = dual + @as(@Vector(p, T), @splat(t)) * dual_step;
+            const grad_t = grad(x_t);
+            var r_dual_t: @Vector(n, T) = undefined;
+            var r_prim_t: @Vector(p, T) = undefined;
+            r(
+                n,
+                p,
+                T,
+                &grad_t,
+                &eq_constraints.a,
+                &eq_constraints.b,
+                &x_t,
+                &dual_t,
+                &r_dual_t,
+                &r_prim_t,
+            );
+            const norm_t = r_norm(n, p, T, &r_dual_t, &r_prim_t);
+            if (norm_t <= (1 - param.alpha * t) * norm) break;
+            t *= param.beta;
         }
-        const err: T = -@reduce(.Add, grad * dir) / @as(T, 2.0);
-        if (err < p.e) break;
-        x = x + @as(@Vector(n, T), @splat(t)) * dir;
+
+        x = x + @as(@Vector(n, T), @splat(t)) * x_step;
+        dual = dual + @as(@Vector(p, T), @splat(t)) * dual_step;
     }
-    return x;
+    return .{ .x = x, .dual = dual };
+}
+
+test "optimizeEqConstraints QP" {
+    const eq_constraints = EqConstraints(2, 1, f64){
+        .a = zla.Mat(f64, 1, 2).init(.{ 1.0, 1.0 }),
+        .b = .{1.0},
+    };
+    const result = optimizeEqConstraints(2, 1, f64, f_qp, df, hessian, eq_constraints, struct {
+        fn solve(
+            hess: *const zla.Mat(f64, 2, 2),
+            a: *const zla.Mat(f64, 1, 2),
+            r_dual: *const @Vector(2, f64),
+            r_prim: *const @Vector(1, f64),
+            x_step: *@Vector(2, f64),
+            dual_step: *@Vector(1, f64),
+        ) void {
+            const a_transpose = a.transpose();
+            var kkt = zla.Mat(f64, 3, 3).init(.{
+                0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+            });
+            kkt.set_block(0, 0, hess);
+            kkt.set_block(0, 2, &a_transpose);
+            kkt.set_block(2, 0, a);
+
+            const rhs: @Vector(3, f64) = .{ -r_dual.*[0], -r_dual.*[1], -r_prim.*[0] };
+            var step: @Vector(3, f64) = undefined;
+            kkt.solve_lu(&rhs, &step) catch unreachable;
+
+            x_step.* = .{ step[0], step[1] };
+            dual_step.* = .{step[2]};
+        }
+    }.solve, .{ 0.0, 0.0 }, .{ .e = 1e-10 });
+
+    try std.testing.expectApproxEqAbs(1.0 / 3.0, result.x[0], 1e-9);
+    try std.testing.expectApproxEqAbs(2.0 / 3.0, result.x[1], 1e-9);
+    try std.testing.expectApproxEqAbs(1.0, result.x[0] + result.x[1], 1e-9);
+    try std.testing.expectApproxEqAbs(-4.0 / 3.0, result.dual[0], 1e-9);
 }
