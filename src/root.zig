@@ -283,13 +283,6 @@ fn EqConstraints(comptime n: usize, comptime p: usize, comptime T: type) type {
     };
 }
 
-fn InequalityConstraints(comptime n: usize, comptime m: usize, comptime T: type) type {
-    return struct {
-        h: fn (@Vector(n, T)) @Vector(m, T),
-        jac: fn (@Vector(n, T)) zla.Mat(T, m, n),
-    };
-}
-
 fn ProblemNoConstraints(comptime n: usize, comptime T: type) type {
     return struct {
         func: fn (@Vector(n, T)) T,
@@ -429,11 +422,11 @@ fn optimizeEqConstraints(
         x_step: *@Vector(n, T),
         dual_step: *@Vector(p, T),
     ) void,
-    init_x: ?@Vector(n, T),
+    init_x: @Vector(n, T),
     params: ?Params(T),
 ) EqConstraintsResult(n, p, T) {
     const param: Params(T) = params orelse .{};
-    var x: @Vector(n, T) = init_x orelse @as(@Vector(n, T), @splat(0));
+    var x: @Vector(n, T) = init_x;
     var dual: @Vector(p, T) = @as(@Vector(p, T), @splat(0));
     std.debug.assert(param.e > 0.0);
     std.debug.assert(0.0 < param.alpha and param.alpha < 0.5);
@@ -520,4 +513,218 @@ test "optimizeEqConstraints QP" {
     try std.testing.expectApproxEqAbs(2.0 / 3.0, result.x[1], 1e-9);
     try std.testing.expectApproxEqAbs(1.0, result.x[0] + result.x[1], 1e-9);
     try std.testing.expectApproxEqAbs(-4.0 / 3.0, result.dual[0], 1e-9);
+}
+
+fn InequalityConstraints(comptime n: usize, comptime m: usize, comptime T: type) type {
+    return struct {
+        f: fn (x: @Vector(n, T)) @Vector(m, T),
+        jac: fn (x: @Vector(n, T)) zla.Mat(T, m, n),
+        hess_sum: fn (x: @Vector(n, T), ieq_dual: @Vector(m, T)) zla.Mat(T, n, n),
+    };
+}
+
+fn h_jac_diag_ieq_dual(
+    comptime n: usize,
+    comptime m: usize,
+    comptime T: type,
+    h_jac: *const zla.Mat(T, m, n),
+    ieq_dual: *const @Vector(m, T),
+) zla.Mat(T, m, n) {
+    var h_jac_diag: zla.Mat(T, m, n) = undefined;
+    for (0..n) |i| {
+        h_jac_diag.set_col(i, -h_jac.get_col(i) * ieq_dual.*);
+    }
+    return h_jac_diag;
+}
+
+test "h_jac_diag_cent" {
+    const h_jac = zla.Mat(f64, 2, 2).init(.{
+        1.0, 2.0,
+        3.0, 4.0,
+    });
+    const ieq_dual: @Vector(2, f64) = .{ 1.0, 2.0 };
+    const result = h_jac_diag_ieq_dual(2, 2, f64, &h_jac, &ieq_dual);
+    try std.testing.expectEqual(result, zla.Mat(f64, 2, 2).init(.{
+        -1.0, -2.0,
+        -6.0, -8.0,
+    }));
+}
+
+fn ie_r(
+    comptime n: usize,
+    comptime m: usize,
+    comptime p: usize,
+    comptime T: type,
+    x: *const @Vector(n, T),
+    ieq_dual: *const @Vector(m, T),
+    eq_dual: *const @Vector(p, T),
+    x_grad: *const @Vector(n, T),
+    h: *const @Vector(m, T),
+    h_jac_transpose: *const zla.Mat(T, n, m),
+    a: *const zla.Mat(T, p, n),
+    b: *const @Vector(p, T),
+    t: T,
+    r_dual: *@Vector(n, T),
+    r_cent: *@Vector(m, T),
+    r_prim: *@Vector(p, T),
+) void {
+    var a_transpose_dual: @Vector(n, T) = undefined;
+    a.transpose().vec_mul(eq_dual, &a_transpose_dual);
+    var h_jac_transpose_cent: @Vector(n, T) = undefined;
+    h_jac_transpose.vec_mul(ieq_dual, &h_jac_transpose_cent);
+    r_prim.* = x_grad.* + a_transpose_dual + h_jac_transpose_cent;
+    r_cent.* = -(h.* * ieq_dual.*) - @as(@Vector(m, T), @splat(1.0 / t));
+    var ax: @Vector(p, T) = undefined;
+    a.vec_mul(x, &ax);
+    r_dual.* = ax - b.*;
+}
+
+fn ie_r_norm(
+    comptime n: usize,
+    comptime p: usize,
+    comptime m: usize,
+    comptime T: type,
+    r_dual: *const @Vector(n, T),
+    r_cent: *const @Vector(m, T),
+    r_prim: *const @Vector(p, T),
+) T {
+    return @sqrt(@reduce(.Add, r_prim.* * r_prim.*) + @reduce(.Add, r_dual.* * r_dual.*) + @reduce(.Add, r_cent.* * r_cent.*));
+}
+
+fn InequalityConstraintsParams(comptime T: type) type {
+    return struct {
+        e_feasible: T = 1e-6,
+        e_gap: T = 1e-6,
+        alpha: T = 0.4,
+        beta: T = 0.5,
+    };
+}
+
+fn optimizeGeneralConstraints(
+    comptime n: usize,
+    comptime m: usize,
+    comptime p: usize,
+    comptime T: type,
+    f: fn (x: @Vector(n, T)) T,
+    grad: fn (x: @Vector(n, T)) @Vector(n, T),
+    hess: fn (x: @Vector(n, T)) zla.Mat(T, n, n),
+    eq_constraints: EqConstraints(n, p, T),
+    ieq_constraints: InequalityConstraints(n, m, T),
+    solver: fn (
+        block_hess: *const zla.Mat(T, n, n),
+        block_h_jac_transpose: *const zla.Mat(T, n, m),
+        block_a: *const zla.Mat(T, p, n),
+        block_h_jac_diag_iedual: *const zla.Mat(T, m, n),
+        block_diag_h: *const @Vector(m, T),
+        r_dual: *const @Vector(n, T),
+        r_cent: *const @Vector(m, T),
+        r_prim: *const @Vector(p, T),
+        x_step: *@Vector(n, T),
+        ieq_dual_step: *@Vector(m, T),
+        eq_dual_step: *@Vector(p, T),
+    ) void,
+    init_x: @Vector(n, T),
+    params: ?Params(T),
+) void {
+    const param: Params(T) = params orelse .{};
+    var x: @Vector(n, T) = init_x;
+    var ieq_dual: @Vector(m, T) = @as(@Vector(m, T), @splat(1));
+    var eq_dual: @Vector(p, T) = @as(@Vector(p, T), @splat(1));
+
+    std.debug.assert(param.e > 0.0);
+    std.debug.assert(0.0 < param.alpha and param.alpha < 0.5);
+    std.debug.assert(0.0 < param.beta and param.beta < 1.0);
+    std.debug.assert(!std.math.isInf(f(x)) and !std.math.isNan(f(x)));
+
+    var r_dual: @Vector(n, T) = undefined;
+    var r_cent: @Vector(m, T) = undefined;
+    var r_prim: @Vector(p, T) = undefined;
+
+    var x_step: @Vector(n, T) = undefined;
+    var ieq_dual_step: @Vector(m, T) = undefined;
+    var eq_dual_step: @Vector(p, T) = undefined;
+
+    while (true) {
+        const grad_val = grad(x);
+        const hess_val = hess(x);
+        const h_val = ieq_constraints.f(x);
+        const h_jac_val = ieq_constraints.jac(x);
+        const hess_sum_val = ieq_constraints.hess_sum(x, ieq_dual);
+        const block_h_jac_transpose = h_jac_val.transpose();
+        const gap = -@reduce(.Add, h_val * ieq_dual);
+        ie_r(
+            n,
+            p,
+            m,
+            T,
+            &x,
+            &ieq_dual,
+            &eq_dual,
+            &grad_val,
+            &h_val,
+            &block_h_jac_transpose,
+            &eq_constraints.a,
+            &eq_constraints.b,
+            gap,
+            &r_dual,
+            &r_cent,
+            &r_prim,
+        );
+        const norm = ie_r_norm(n, p, m, T, &r_dual, &r_cent, &r_prim);
+        if (@reduce(.Add, r_prim * r_prim) < param.e_feasible and @reduce(.Add, r_dual * r_dual) < param.e_feasible and gap < param.e_gap) break;
+        var block_hess: zla.Mat(T, n, n) = undefined;
+        hess_val.mat_add(&hess_sum_val, &block_hess);
+        const block_h_jac_diag_ieq_dual = h_jac_diag_ieq_dual(n, m, T, &h_jac_val, &ieq_dual);
+        const neg_h_val = -h_val;
+        solver(
+            &block_hess,
+            &block_h_jac_transpose,
+            &eq_constraints.a,
+            &block_h_jac_diag_ieq_dual,
+            &neg_h_val,
+            &r_dual,
+            &r_cent,
+            &r_prim,
+            &x_step,
+            &ieq_dual_step,
+            &eq_dual_step,
+        );
+
+        var t: T = 1.0;
+        while (true) {
+            var r_dual_t: @Vector(n, T) = undefined;
+            var r_cent_t: @Vector(m, T) = undefined;
+            var r_prim_t: @Vector(p, T) = undefined;
+            const x_t = x + @as(@Vector(n, T), @splat(t)) * x_step;
+            const ieq_dual_t = ieq_dual + @as(@Vector(m, T), @splat(t)) * ieq_dual_step;
+            const eq_dual_t = eq_dual + @as(@Vector(p, T), @splat(t)) * eq_dual_step;
+            const grad_val_t = grad(x_t);
+            const h_val_t = ieq_constraints.f(x_t);
+            const block_h_jac_transpose_t = ieq_constraints.jac(x_t).transpose();
+            ie_r(
+                n,
+                p,
+                m,
+                T,
+                &x_t,
+                &ieq_dual_t,
+                &eq_dual_t,
+                &grad_val_t,
+                &h_val_t,
+                &block_h_jac_transpose_t,
+                &eq_constraints.a,
+                &eq_constraints.b,
+                @reduce(.Add, h_val_t * ieq_dual_t),
+                &r_dual_t,
+                &r_cent_t,
+                &r_prim_t,
+            );
+            const norm_t = ie_r_norm(n, p, m, T, &r_dual_t, &r_cent_t, &r_prim_t);
+            if (norm_t <= (1 - param.alpha * t) * norm) break;
+            t *= param.beta;
+        }
+        x = x + @as(@Vector(n, T), @splat(t)) * x_step;
+        ieq_dual = ieq_dual + @as(@Vector(m, T), @splat(t)) * ieq_dual_step;
+        eq_dual = eq_dual + @as(@Vector(p, T), @splat(t)) * eq_dual_step;
+    }
 }
