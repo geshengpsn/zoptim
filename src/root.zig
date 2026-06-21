@@ -591,7 +591,7 @@ fn ie_r_norm(
     return @sqrt(@reduce(.Add, r_prim.* * r_prim.*) + @reduce(.Add, r_dual.* * r_dual.*) + @reduce(.Add, r_cent.* * r_cent.*));
 }
 
-fn InequalityConstraintsParams(comptime T: type) type {
+fn GeneralConstraintsParams(comptime T: type) type {
     return struct {
         e_feasible: T = 1e-6,
         e_gap: T = 1e-6,
@@ -624,9 +624,9 @@ fn optimizeGeneralConstraints(
         eq_dual_step: *@Vector(p, T),
     ) void,
     init_x: @Vector(n, T),
-    params: ?Params(T),
+    params: ?GeneralConstraintsParams(T),
 ) void {
-    const param: Params(T) = params orelse .{};
+    const param: GeneralConstraintsParams(T) = params orelse .{};
     var x: @Vector(n, T) = init_x;
     var ieq_dual: @Vector(m, T) = @as(@Vector(m, T), @splat(1));
     var eq_dual: @Vector(p, T) = @as(@Vector(p, T), @splat(1));
@@ -714,7 +714,7 @@ fn optimizeGeneralConstraints(
                 &block_h_jac_transpose_t,
                 &eq_constraints.a,
                 &eq_constraints.b,
-                @reduce(.Add, h_val_t * ieq_dual_t),
+                -@reduce(.Add, h_val_t * ieq_dual_t),
                 &r_dual_t,
                 &r_cent_t,
                 &r_prim_t,
