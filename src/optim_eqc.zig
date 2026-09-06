@@ -125,6 +125,8 @@ pub fn optimizeEqConstraints(
     return .{ .x = x, .dual = dual };
 }
 
+/// slove KKT system
+///
 fn eqc_general_solver(
     hess: *const zla.Mat(f64, 2, 2),
     a: *const zla.Mat(f64, 1, 2),

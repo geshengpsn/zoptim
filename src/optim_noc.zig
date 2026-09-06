@@ -68,6 +68,7 @@ const funcs = struct {
     }
 };
 
+/// slove Ax = -b
 pub fn noc_general_solver(
     a: *const zla.Mat(f64, 2, 2),
     b: *const @Vector(2, f64),
