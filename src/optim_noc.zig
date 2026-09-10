@@ -75,7 +75,7 @@ pub fn noc_general_solver(
     x: *@Vector(2, f64),
 ) void {
     const rhs = -b.*;
-    a.solve_lu(&rhs, x) catch unreachable;
+    a.solveLuAssign(&rhs, x) catch unreachable;
 }
 
 test "optimizeNoConstraints" {

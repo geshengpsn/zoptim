@@ -30,11 +30,11 @@ fn r(
 ) void {
     const a_transpose = a.transpose();
     var a_transpose_dual: @Vector(n, T) = undefined;
-    a_transpose.vec_mul(dual, &a_transpose_dual);
+    a_transpose.vecMulAssign(dual, &a_transpose_dual);
 
     r_dual.* = grad_val.* + a_transpose_dual;
     var ax: @Vector(p, T) = undefined;
-    a.vec_mul(x, &ax);
+    a.vecMulAssign(x, &ax);
     r_prim.* = ax - b.*;
 }
 
@@ -141,13 +141,13 @@ fn eqc_general_solver(
         0.0, 0.0, 0.0,
         0.0, 0.0, 0.0,
     });
-    kkt.set_block(0, 0, hess);
-    kkt.set_block(0, 2, &a_transpose);
-    kkt.set_block(2, 0, a);
+    kkt.setBlock(0, 0, hess);
+    kkt.setBlock(0, 2, &a_transpose);
+    kkt.setBlock(2, 0, a);
 
     const rhs: @Vector(3, f64) = .{ -r_dual.*[0], -r_dual.*[1], -r_prim.*[0] };
     var step: @Vector(3, f64) = undefined;
-    kkt.solve_lu(&rhs, &step) catch unreachable;
+    kkt.solveLuAssign(&rhs, &step) catch unreachable;
 
     x_step.* = .{ step[0], step[1] };
     dual_step.* = .{step[2]};
@@ -162,14 +162,14 @@ const Q: @Vector(2, f64) = .{ 1.0, 0.0 };
 
 fn f_qp(x: @Vector(2, f64)) f64 {
     var temp: @Vector(2, f64) = undefined;
-    P.vec_mul(&x, &temp);
+    temp = P.vecMul(&x);
     temp = temp * @as(@Vector(2, f64), @splat(0.5));
     return @reduce(.Add, x * (temp + Q));
 }
 
 fn df(x: @Vector(2, f64)) @Vector(2, f64) {
     var temp: @Vector(2, f64) = undefined;
-    P.vec_mul(&x, &temp);
+    temp = P.vecMul(&x);
     return temp + Q;
 }
 

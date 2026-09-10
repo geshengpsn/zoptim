@@ -128,16 +128,16 @@ pub fn findRoot(
         var rhs = -residual;
         // Make LU's absolute pivot threshold relative to each equation's scale.
         inline for (0..n) |i| {
-            const row = jacobian.get_row(i);
+            const row = jacobian.getRow(i);
             const scale = infinityNorm(n, T, row);
             if (!std.math.isFinite(scale)) return error.NonFiniteValue;
             if (scale == 0) return error.SingularJacobian;
-            jacobian.set_row(i, row / @as(Vec, @splat(scale)));
+            jacobian.setRow(i, row / @as(Vec, @splat(scale)));
             rhs[i] /= scale;
         }
         if (!std.math.isFinite(infinityNorm(n, T, rhs))) return error.NonFiniteValue;
         var step: Vec = undefined;
-        jacobian.solve_lu(&rhs, &step) catch return error.SingularJacobian;
+        jacobian.solveLuAssign(&rhs, &step) catch return error.SingularJacobian;
         if (!std.math.isFinite(infinityNorm(n, T, step))) return error.NonFiniteValue;
 
         var t: T = 1;
@@ -205,16 +205,16 @@ fn solveStructPartial(
         var rhs = -residual;
         // Make LU's absolute pivot threshold relative to each equation's scale.
         inline for (0..m) |i| {
-            const row = jacobian.get_row(i);
+            const row = jacobian.getRow(i);
             const scale = infinityNorm(m, T, row);
             if (!std.math.isFinite(scale)) return error.NonFiniteValue;
             if (scale == 0) return error.SingularJacobian;
-            jacobian.set_row(i, row / @as(Vec, @splat(scale)));
+            jacobian.setRow(i, row / @as(Vec, @splat(scale)));
             rhs[i] /= scale;
         }
         if (!std.math.isFinite(infinityNorm(m, T, rhs))) return error.NonFiniteValue;
         var step: Vec = undefined;
-        jacobian.solve_lu(&rhs, &step) catch return error.SingularJacobian;
+        jacobian.solveLuAssign(&rhs, &step) catch return error.SingularJacobian;
         if (!std.math.isFinite(infinityNorm(m, T, step))) return error.NonFiniteValue;
 
         var t: T = 1;

@@ -20,7 +20,7 @@ fn h_jac_diag_ieq_dual(
 ) zla.Mat(T, m, n) {
     var h_jac_diag: zla.Mat(T, m, n) = undefined;
     for (0..n) |i| {
-        h_jac_diag.set_col(i, -h_jac.get_col(i) * ieq_dual.*);
+        h_jac_diag.setCol(i, -h_jac.getCol(i) * ieq_dual.*);
     }
     return h_jac_diag;
 }
@@ -59,13 +59,13 @@ fn ie_r(
     r_ieq: *@Vector(m, T),
 ) void {
     var a_transpose_dual: @Vector(n, T) = undefined;
-    a.transpose().vec_mul(eq_dual, &a_transpose_dual);
+    a.transpose().vecMulAssign(eq_dual, &a_transpose_dual);
     var h_jac_transpose_cent: @Vector(n, T) = undefined;
-    h_jac_transpose.vec_mul(ieq_dual, &h_jac_transpose_cent);
+    h_jac_transpose.vecMulAssign(ieq_dual, &h_jac_transpose_cent);
     r_dual.* = x_grad.* + a_transpose_dual + h_jac_transpose_cent;
     r_cent.* = slack.* * ieq_dual.* - @as(@Vector(m, T), @splat(1.0 / t));
     var ax: @Vector(p, T) = undefined;
-    a.vec_mul(x, &ax);
+    a.vecMulAssign(x, &ax);
     r_prim.* = ax - b.*;
     r_ieq.* = h.* + slack.*;
 }
@@ -216,7 +216,7 @@ pub fn optimizeGeneralConstraints(
         const norm = ie_r_norm(n, m, p, T, &r_dual, &r_cent, &r_prim, &r_ieq);
         if (@reduce(.Add, r_prim * r_prim) < param.e_feasible * param.e_feasible and @reduce(.Add, r_ieq * r_ieq) < param.e_feasible * param.e_feasible and @reduce(.Add, r_dual * r_dual) < param.e_feasible * param.e_feasible and gap < param.e_gap) break;
         var block_hess: zla.Mat(T, n, n) = undefined;
-        hess_val.mat_add(&hess_sum_val, &block_hess);
+        block_hess = hess_val.matAdd(&hess_sum_val);
         const block_h_jac_diag_ieq_dual = h_jac_diag_ieq_dual(n, m, T, &h_jac_val, &ieq_dual);
         const solver_r_cent = r_cent - ieq_dual * r_ieq;
         solver(
@@ -232,7 +232,7 @@ pub fn optimizeGeneralConstraints(
             &ieq_dual_step,
             &eq_dual_step,
         );
-        h_jac_val.vec_mul(&x_step, &slack_step);
+        h_jac_val.vecMulAssign(&x_step, &slack_step);
         slack_step = -r_ieq - slack_step;
 
         if (comptime use_correction_step and init_mode == .infeasible) {
@@ -262,7 +262,7 @@ pub fn optimizeGeneralConstraints(
             );
 
             var correction_slack_step: @Vector(m, T) = undefined;
-            h_jac_val.vec_mul(&correction_x_step, &correction_slack_step);
+            h_jac_val.vecMulAssign(&correction_x_step, &correction_slack_step);
             correction_slack_step = -correction_r_ieq - correction_slack_step;
 
             x_step += correction_x_step;
@@ -365,16 +365,16 @@ fn gc_general_solver(
         0.0, 0.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 0.0,
     });
-    kkt.set_block(0, 0, block_hess);
-    kkt.set_block(0, 2, block_h_jac_transpose);
-    kkt.set_block(0, 4, &block_a_transpose);
-    kkt.set_block(2, 0, block_h_jac_diag_iedual);
-    kkt.set_block(2, 2, &block_diag_h_mat);
-    kkt.set_block(4, 0, block_a);
+    kkt.setBlock(0, 0, block_hess);
+    kkt.setBlock(0, 2, block_h_jac_transpose);
+    kkt.setBlock(0, 4, &block_a_transpose);
+    kkt.setBlock(2, 0, block_h_jac_diag_iedual);
+    kkt.setBlock(2, 2, &block_diag_h_mat);
+    kkt.setBlock(4, 0, block_a);
 
     const rhs: @Vector(5, f64) = .{ -r_dual.*[0], -r_dual.*[1], -r_cent.*[0], -r_cent.*[1], -r_prim.*[0] };
     var step: @Vector(5, f64) = undefined;
-    kkt.solve_lu(&rhs, &step) catch unreachable;
+    kkt.solveLuAssign(&rhs, &step) catch unreachable;
 
     x_step.* = .{ step[0], step[1] };
     ieq_dual_step.* = .{ step[2], step[3] };
@@ -390,14 +390,14 @@ const Q: @Vector(2, f64) = .{ 1.0, 0.0 };
 
 fn f_qp(x: @Vector(2, f64)) f64 {
     var temp: @Vector(2, f64) = undefined;
-    P.vec_mul(&x, &temp);
+    temp = P.vecMul(&x);
     temp = temp * @as(@Vector(2, f64), @splat(0.5));
     return @reduce(.Add, x * (temp + Q));
 }
 
 fn df(x: @Vector(2, f64)) @Vector(2, f64) {
     var temp: @Vector(2, f64) = undefined;
-    P.vec_mul(&x, &temp);
+    temp = P.vecMul(&x);
     return temp + Q;
 }
 
