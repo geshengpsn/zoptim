@@ -3,13 +3,13 @@
 const std = @import("std");
 const Io = std.Io;
 const zla = @import("zla");
-const zplotly = @import("zplotly");
 const noc = @import("optim_noc.zig");
 const eqc = @import("optim_eqc.zig");
 const gc = @import("optim_gc.zig");
 const root_find = @import("root_find.zig");
 
 pub const findRoot = root_find.findRoot;
+pub const findRootPartial = root_find.findRootPartial;
 pub const RootParams = root_find.RootParams;
 pub const RootResult = root_find.RootResult;
 pub const RootError = root_find.RootError;

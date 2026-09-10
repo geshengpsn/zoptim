@@ -21,12 +21,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const zla_mod = zla_dep.module("zla");
-
-    const zplotly_dep = b.dependency("zplotly", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const zplotly_mod = zplotly_dep.module("zplotly");
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -52,7 +46,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "zla", .module = zla_mod },
-            .{ .name = "zplotly", .module = zplotly_mod },
         },
     });
 
@@ -95,7 +88,6 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "zoptim", .module = mod },
                 .{ .name = "zla", .module = zla_mod },
-                .{ .name = "zplotly", .module = zplotly_mod },
             },
         }),
     });

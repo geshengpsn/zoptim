@@ -43,6 +43,51 @@ fn infinityNorm(comptime n: usize, comptime T: type, value: @Vector(n, T)) T {
     return norm;
 }
 
+/// The single struct parameter type of `f`.
+fn paramStruct(comptime F: type) type {
+    return @typeInfo(F).@"fn".params[0].type.?;
+}
+
+/// The return type of `f`.
+fn returnVector(comptime F: type) type {
+    return @typeInfo(F).@"fn".return_type.?;
+}
+
+fn fieldVectorLen(comptime Vec: type) usize {
+    return @typeInfo(Vec).vector.len;
+}
+
+/// The vector type solved by `findRootPartial` for the given struct.
+fn freeVector(comptime Args: type, comptime free_index: usize) type {
+    return std.meta.fields(Args)[free_index].type;
+}
+
+/// The floating point element type shared by every struct field.
+fn scalarType(comptime Args: type) type {
+    return @typeInfo(std.meta.fields(Args)[0].type).vector.child;
+}
+
+/// The square Jacobian type df/d(free vector).
+fn freeJacobian(comptime Args: type, comptime free_index: usize) type {
+    const m = fieldVectorLen(freeVector(Args, free_index));
+    return zla.Mat(scalarType(Args), m, m);
+}
+
+fn validateStruct(comptime Args: type, comptime free_index: usize) void {
+    comptime {
+        const fields = std.meta.fields(Args);
+        if (fields.len == 0) @compileError("findRootPartial requires a non-empty struct");
+        if (free_index >= fields.len) @compileError("findRootPartial free_index out of range");
+        if (@typeInfo(fields[0].type) != .vector) @compileError("findRootPartial struct fields must be @Vector");
+        const T = @typeInfo(fields[0].type).vector.child;
+        if (@typeInfo(T) != .float) @compileError("findRootPartial requires floating point struct fields");
+        for (fields) |field| {
+            if (@typeInfo(field.type) != .vector) @compileError("findRootPartial struct fields must be @Vector");
+            if (@typeInfo(field.type).vector.child != T) @compileError("findRootPartial struct fields must share one element type");
+        }
+    }
+}
+
 /// Solves f(x) = 0 using damped Newton steps and residual backtracking.
 /// `jac` must return J[i,j] = df[i]/dx[j]; each step solves J * step = -f(x)
 /// with row scaling and zla's pivoted LU solver. Pass null for default parameters.
@@ -117,6 +162,123 @@ pub fn findRoot(
         }
     }
     return .{ .x = x, .residual_norm = norm, .iterations = iterations };
+}
+
+fn StructRootResult(comptime Args: type, comptime T: type) type {
+    return struct {
+        args: Args,
+        residual_norm: T,
+        iterations: usize,
+    };
+}
+
+fn structIsFinite(comptime Args: type, comptime T: type, args: Args) bool {
+    inline for (std.meta.fields(Args)) |field| {
+        if (!std.math.isFinite(infinityNorm(fieldVectorLen(field.type), T, @field(args, field.name)))) return false;
+    }
+    return true;
+}
+
+fn solveStructPartial(
+    comptime Args: type,
+    comptime free_index: usize,
+    comptime T: type,
+    f: fn (Args) freeVector(Args, free_index),
+    jac: fn (Args) freeJacobian(Args, free_index),
+    init: Args,
+    param: RootParams(T),
+) RootError!StructRootResult(Args, T) {
+    const Vec = freeVector(Args, free_index);
+    const m = comptime fieldVectorLen(Vec);
+    const free_name = std.meta.fields(Args)[free_index].name;
+
+    var args = init;
+    if (!structIsFinite(Args, T, args)) return error.NonFiniteValue;
+    var residual = f(args);
+    var norm = infinityNorm(m, T, residual);
+    if (!std.math.isFinite(norm)) return error.NonFiniteValue;
+
+    var iterations: usize = 0;
+    while (norm > param.e) : (iterations += 1) {
+        if (iterations == param.max_iterations) return error.MaxIterationsExceeded;
+        var jacobian = jac(args);
+        var rhs = -residual;
+        // Make LU's absolute pivot threshold relative to each equation's scale.
+        inline for (0..m) |i| {
+            const row = jacobian.get_row(i);
+            const scale = infinityNorm(m, T, row);
+            if (!std.math.isFinite(scale)) return error.NonFiniteValue;
+            if (scale == 0) return error.SingularJacobian;
+            jacobian.set_row(i, row / @as(Vec, @splat(scale)));
+            rhs[i] /= scale;
+        }
+        if (!std.math.isFinite(infinityNorm(m, T, rhs))) return error.NonFiniteValue;
+        var step: Vec = undefined;
+        jacobian.solve_lu(&rhs, &step) catch return error.SingularJacobian;
+        if (!std.math.isFinite(infinityNorm(m, T, step))) return error.NonFiniteValue;
+
+        var t: T = 1;
+        var backtracks: usize = 0;
+        while (true) : (backtracks += 1) {
+            const free = @field(args, free_name) + @as(Vec, @splat(t)) * step;
+            var trial = args;
+            @field(trial, free_name) = free;
+            if (@reduce(.And, free == @field(args, free_name))) return error.LineSearchFailed;
+            if (structIsFinite(Args, T, trial)) {
+                const trial_residual = f(trial);
+                const trial_norm = infinityNorm(m, T, trial_residual);
+                if (trial_norm <= param.e or
+                    (trial_norm < norm and trial_norm <= (1 - param.alpha * t) * norm))
+                {
+                    args = trial;
+                    residual = trial_residual;
+                    norm = trial_norm;
+                    break;
+                }
+            }
+            if (backtracks == param.max_backtracks) return error.LineSearchFailed;
+            t *= param.beta;
+        }
+    }
+    return .{ .args = args, .residual_norm = norm, .iterations = iterations };
+}
+
+/// Solves f(args) = 0 for one field of a struct of vectors while the remaining
+/// fields stay fixed. `f` and `jac` each take the struct; `f` returns the free
+/// `@Vector` and `jac` returns its square Jacobian. `free_field` selects which
+/// field is solved; the other fields of `init` are constants.
+///
+/// All concrete types (struct shape, element type, dimensions) are derived at
+/// compile time from `f`, so callers only pass the functions, the initial
+/// struct and the free field. Pass null for default parameters.
+pub fn findRootPartial(
+    f: anytype,
+    comptime free_field: std.meta.FieldEnum(paramStruct(@TypeOf(f))),
+    jac: fn (paramStruct(@TypeOf(f))) freeJacobian(paramStruct(@TypeOf(f)), @intFromEnum(free_field)),
+    init: paramStruct(@TypeOf(f)),
+    params: ?RootParams(scalarType(paramStruct(@TypeOf(f)))),
+) RootError!paramStruct(@TypeOf(f)) {
+    const Args = paramStruct(@TypeOf(f));
+    const T = scalarType(Args);
+    const free_index = comptime @intFromEnum(free_field);
+    comptime {
+        if (@typeInfo(@TypeOf(f)).@"fn".params.len != 1) {
+            @compileError("findRootPartial: f must take exactly one struct parameter");
+        }
+        validateStruct(Args, free_index);
+        if (returnVector(@TypeOf(f)) != freeVector(Args, free_index)) {
+            @compileError("findRootPartial: f must return the free vector type");
+        }
+    }
+    const param: RootParams(T) = params orelse .{};
+    if (!std.math.isFinite(param.e) or param.e <= 0 or
+        !(param.alpha > 0 and param.alpha < 0.5) or
+        !(param.beta > 0 and param.beta < 1))
+    {
+        return error.InvalidParameters;
+    }
+    const result = try solveStructPartial(Args, free_index, T, f, jac, init, param);
+    return result.args;
 }
 
 test "findRoot solves a nonlinear system with f32 and f64" {
@@ -312,4 +474,98 @@ test "findRoot reports failed backtracking and stagnation" {
     };
     try std.testing.expectError(error.LineSearchFailed, findRoot(1, f64, funcs.f, funcs.jac, .{0}, .{ .max_backtracks = 3 }));
     try std.testing.expectError(error.LineSearchFailed, findRoot(1, f64, funcs.f, funcs.jac, .{1e30}, null));
+}
+
+test "findRootPartial holds x1 fixed and solves x2" {
+    const Args = struct {
+        x1: @Vector(1, f64),
+        x2: @Vector(1, f64),
+    };
+    const funcs = struct {
+        fn f(args: Args) @Vector(1, f64) {
+            return .{args.x1[0] + args.x2[0] - 3};
+        }
+
+        fn jac(_: Args) zla.Mat(f64, 1, 1) {
+            return zla.Mat(f64, 1, 1).init(.{1});
+        }
+    };
+    const result = try findRootPartial(funcs.f, .x2, funcs.jac, .{ .x1 = .{1}, .x2 = .{0} }, null);
+    try std.testing.expectEqual(@as(f64, 1), result.x1[0]);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.x2[0], 1e-12);
+}
+
+test "findRootPartial solves a nonlinear free field with f32 and f64" {
+    inline for (.{ f32, f64 }) |T| {
+        const Args = struct {
+            x1: @Vector(1, T),
+            x2: @Vector(1, T),
+        };
+        const funcs = struct {
+            fn f(args: Args) @Vector(1, T) {
+                return .{args.x2[0] * args.x2[0] - args.x1[0]};
+            }
+
+            fn jac(args: Args) zla.Mat(T, 1, 1) {
+                return zla.Mat(T, 1, 1).init(.{2 * args.x2[0]});
+            }
+        };
+        const result = try findRootPartial(funcs.f, .x2, funcs.jac, .{ .x1 = .{4}, .x2 = .{1} }, null);
+        try std.testing.expectEqual(@as(T, 4), result.x1[0]);
+        try std.testing.expectApproxEqAbs(@as(T, 2), result.x2[0], @sqrt(std.math.floatEps(T)));
+    }
+}
+
+test "findRootPartial solves a free vector and leaves other struct fields fixed" {
+    const Args = struct {
+        x: @Vector(2, f64),
+        p: @Vector(1, f64),
+    };
+    const funcs = struct {
+        fn f(args: Args) @Vector(2, f64) {
+            return .{ args.x[0] + args.x[1] - args.p[0], args.x[0] - args.x[1] };
+        }
+
+        fn jac(_: Args) zla.Mat(f64, 2, 2) {
+            return zla.Mat(f64, 2, 2).init(.{ 1, 1, 1, -1 });
+        }
+    };
+    const result = try findRootPartial(funcs.f, .x, funcs.jac, .{ .x = .{ 0, 0 }, .p = .{4} }, null);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.x[0], 1e-12);
+    try std.testing.expectApproxEqAbs(@as(f64, 2), result.x[1], 1e-12);
+    try std.testing.expectEqual(@as(f64, 4), result.p[0]);
+}
+
+test "findRootPartial rejects a non-finite fixed field" {
+    const Args = struct {
+        x1: @Vector(1, f64),
+        x2: @Vector(1, f64),
+    };
+    const funcs = struct {
+        fn f(args: Args) @Vector(1, f64) {
+            return .{args.x1[0] + args.x2[0] - 3};
+        }
+
+        fn jac(_: Args) zla.Mat(f64, 1, 1) {
+            return zla.Mat(f64, 1, 1).init(.{1});
+        }
+    };
+    try std.testing.expectError(error.NonFiniteValue, findRootPartial(funcs.f, .x2, funcs.jac, .{ .x1 = .{std.math.inf(f64)}, .x2 = .{0} }, null));
+}
+
+test "findRootPartial rejects invalid parameters before evaluating callbacks" {
+    const Args = struct {
+        x1: @Vector(1, f64),
+        x2: @Vector(1, f64),
+    };
+    const funcs = struct {
+        fn f(_: Args) @Vector(1, f64) {
+            unreachable;
+        }
+
+        fn jac(_: Args) zla.Mat(f64, 1, 1) {
+            unreachable;
+        }
+    };
+    try std.testing.expectError(error.InvalidParameters, findRootPartial(funcs.f, .x2, funcs.jac, .{ .x1 = .{1}, .x2 = .{0} }, .{ .e = 0 }));
 }
